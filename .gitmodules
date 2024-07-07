@@ -1,0 +1,3 @@
+[submodule "hedgehog-tokenizer"]
+	path = hedgehog-tokenizer
+	url = https://github.com/Dimandragon/hedgehog-tokenizer.git
