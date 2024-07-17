@@ -17,15 +17,14 @@ import braindecode
 from braindecode.datasets import MOABBDataset, BaseConcatDataset
 from numpy import multiply
 
-sys.path.append("hedgehog-tokenizer/linux_x86_64/")
+sys.path.append("hedgehog-tokenizer/out/")
 import extractor
 import encoding
-
+DIM_COUNT = 15
 TGT_VOCAB_SIZE = 5
-DIM=64
-NUM_HEADS=4
+NUM_HEADS=5
 NUM_LAYERS=4
-FF_DIM = 64
+FF_DIM = 512
 DROPOUT = 0.5
 N_CHANNELS = 22
 SEQ_LEN = 500
@@ -98,31 +97,11 @@ def tokensFrom2DTensor(data, dim_count):
             tensor[3] = encoding.periodicalFunctionEncodding(raw_token.inst_freq, max_inst_freq,dim_count)
             tensor[4] = encoding.periodicalFunctionEncodding(raw_token.inst_ampl, max_inst_ampl,dim_count)
             tensor[5] = encoding.periodicalFunctionEncodding(raw_token.phase, max_phase,dim_count)                                
-            tensor[6] = i
-            encoded_tokens.append(tensor)
+            tensor[6] = encoding.periodicalFunctionEncodding(i, N_CHANNELS, dim_count) 
+            
+            encoded_tokens.append(tensor.reshape(7*dim_count))
+            
     return encoded_tokens
-
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, seq_length, model_dim):
-        super(PositionalEncoding,self).__init__()
-        self.sl = seq_length
-        self.md = model_dim
-        self.encodings_matrices = torch.zeros(self.sl, self.md).to(device)
-        position = torch.arange(0,self.sl,dtype = torch.float).unsqueeze(1).to(device)
-        for p in range(self.sl):
-          for i in range(self.md):
-            d = 2*seq_length/math.pi
-            t = p/(d**(2*i/self.md))
-            if i%2 == 0:
-                self.encodings_matrices[p,i] = math.cos(t)
-            else:
-                self.encodings_matrices[p,i] = math.sin(t)
-        self.copy = torch.clone(self.encodings_matrices)
-    def forward(self,x):
-      output = torch.cat((x,self.copy),1).to(device)
-      return output
 
 class Tokenizator():
     def __init__(self, dim_count):    
@@ -130,34 +109,42 @@ class Tokenizator():
 
     def forward(self, data):
         tokens = tokensFrom2DTensor(data, self.dim_count)
-        #todo
-        return torch.FloatTensor(tokens)
+        #print(tokens[0].size())
+        out = torch.zeros(1300, self.dim_count*7) #(tokens_count, 7, 15)
+        tokens_count = len(tokens)
+        if tokens_count <= 1300:
+            for i in range(0, tokens_count):
+                out[i] = tokens[i]
+        else:
+            for i in range(0, 1300):
+                out[i] = tokens[i]
+
+        print(out.size(),' OUT') #torch.Size([1300, 7, 15]) 
+        return out
 
 class Transformer(nn.Module):
-    def __init__(self, d_model, num_heads, num_layers, d_ff, seq_lenght,in_d,tgt_vocab_size,dim_count):
+    def __init__(self, num_heads, num_layers, d_ff, tgt_vocab_size,dim_count):
         super(Transformer, self).__init__()
-        self.in_d = in_d
-        self.seq_lenght = seq_lenght
+        self.d_model = 7*dim_count
         self.encoder_embedding = Tokenizator(dim_count)
-        self.positional_encoding = PositionalEncoding(seq_lenght + dim_count*6, d_model)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model*2, num_heads, d_ff, dropout = 0., activation= "gelu")
+        self.encoder_layer = nn.TransformerEncoderLayer(self.d_model, num_heads, d_ff, dropout = 0., activation= "gelu")
 
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers)
-        self.pooling = nn.Linear(d_model*2, tgt_vocab_size)
+        self.pooling = nn.Linear(self.d_model, tgt_vocab_size)
         self.dense = nn.Linear(tgt_vocab_size, tgt_vocab_size)
         self.optimizer = optim.AdamW(self.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9)
         self.softmax = nn.Softmax(dim = 1)
-        self.mask = torch.triu(torch.ones(seq_lenght,d_model*2), diagonal=1)
+        self.mask = torch.triu(torch.ones(N_CHANNELS,self.d_model), diagonal=1)
         self.mask = self.mask.int().float().to(device)
 
     def forward(self,src):
         embeddings = self.encoder_embedding.forward(src)     
-        src_embedded = self.positional_encoding(embeddings).to(device)
-        enc_output = self.encoder.forward(src_embedded).to(device)
+        enc_output = self.encoder.forward(embeddings).to(device)
         fc_output = self.pooling(enc_output).to(device)
         dense_output = self.dense(fc_output)
-        output = self.softmax(dense_output).to(device)
-        return [output, src_embedded]
+        predictions = self.softmax(dense_output).to(device)
+        output = torch.argmax(predictions)
+        return output
 
     def weightedAccuracy(self, output, labels):
         correct = 0
@@ -171,10 +158,10 @@ class Transformer(nn.Module):
             sum += 1/gistogram[true_pred[i]]    
         return correct/sum
 
-    def training_step(self, batch):
-        data, lab = batch
+    def training_step(self, data, lab):
+
         self.optimizer.zero_grad()
-        output, _ = self.forward(data)
+        output = self.forward(data)
         f_output = output.view(-1, TGT_VOCAB_SIZE)
         loss = weighted_loss(f_output, lab)
         loss.backward(loss)
@@ -184,7 +171,7 @@ class Transformer(nn.Module):
 
     def valid_step(self,batch):
         data,y,true_pred = batch
-        output, embeddings = self.forward(data)
+        output = self.forward(data)
         f_output = output.view(-1,TGT_VOCAB_SIZE)
         loss = weighted_loss(f_output, true_pred)
         accuracy = self.weightedAccuracy(f_output, true_pred)
@@ -232,6 +219,8 @@ validating_datasets = []
 pred_batches = []
 gistogram = [0,0,0,0,0]
 
+preds_for_one = []
+
 for i in range(len(validating_set)):
     valid_raw = validating_set[i].raw
     raw_data = torch.from_numpy(valid_raw.get_data()).to(device)
@@ -240,11 +229,9 @@ for i in range(len(validating_set)):
     true_preds = torch.from_numpy(mne.events_from_annotations(valid_raw)[0]).to(device)
     pred_dict = {}
     for l in true_preds:
-        pred_dict[l[0].item()] = l[2].item()
-    pred_matrices,valid_gistogram = labels_to_matrices(pred_dict, TGT_VOCAB_SIZE, n_batches * SEQ_LEN)
-    for j in range(TGT_VOCAB_SIZE):
-        gistogram[j] += valid_gistogram[j]
-    pred_batches += torch.split(pred_matrices, SEQ_LEN)
+        preds_for_one.append(l[2])
+
+labels_for_one = []
 
 for i in range(len(training_set)):
     train_raw = training_set[i].raw
@@ -252,13 +239,31 @@ for i in range(len(training_set)):
     n_batches = raw_data.size(1)//SEQ_LEN
     training_datasets += slice_to_batches(raw_data, SEQ_LEN, n_batches, N_CHANNELS)
     labels = torch.from_numpy(mne.events_from_annotations(train_raw)[0]).to(device)
-    labels_dict = {}
-    for l in labels:
-        labels_dict[l[0].item()] = l[2].item()
-    labels_matrices,training_gistogram = labels_to_matrices(labels_dict, TGT_VOCAB_SIZE, n_batches * SEQ_LEN)
-    for j in range(TGT_VOCAB_SIZE):
-        gistogram[j] += training_gistogram[j]
-    labels_batches += torch.split(labels_matrices, SEQ_LEN)
+    counter = 0
+    for j in range (n_batches):
+        start = SEQ_LEN * j
+        flag = False
+        label = torch.tensor(5)
+        label = [0., 0., 0., 0., 1.]
+        for id in range (start, start + SEQ_LEN):
+            if (id >= raw_data.size(1)):
+                break
+            if (counter >= labels.size(1)):
+                break
+            if (id == labels[counter][0]):
+                #label = labels[counter][2]
+                label[labels[counter][2] - 1] = 1.0
+                label[4] = 0.0
+                #print(id)
+                #print(labels[counter][2])
+                #print(label)
+                #print(counter)
+                counter += 1
+
+        labels_for_one.append(label)
+#print(labels_for_one)
+   
+
 
 gistogram_tensor = torch.tensor(gistogram).to(device)
 norm_cf = 0.
@@ -268,7 +273,7 @@ for i in gistogram:
 for i in gistogram:
     normalized_list.append((1/i)/norm_cf)
 print(gistogram)
-transformer = Transformer(DIM,NUM_HEADS,NUM_LAYERS,FF_DIM,SEQ_LEN,N_CHANNELS,TGT_VOCAB_SIZE,15)#d_model, num_heads, num_layers, d_ff, seq_lenght, dropout,in_d,tgt_vocab_size
+transformer = Transformer(NUM_HEADS,NUM_LAYERS,FF_DIM,TGT_VOCAB_SIZE,DIM_COUNT)#d_model, num_heads, num_layers, d_ff, seq_lenght, dropout,in_d,tgt_vocab_size
 transformer = transformer.to(device)
 torch.save(transformer, "model.onnx")
 running_loss = 0
@@ -285,7 +290,7 @@ for j in range(EPOCHS):
     running_acc = 0
     for i in range(len(training_datasets)):
         transformer.train()
-        loss, acc = transformer.training_step([training_datasets[i],labels_batches[i]])
+        loss, acc = transformer.training_step(training_datasets[i],labels_for_one[i])
         running_loss += loss.item()
         running_acc += acc
         epoch_loss += loss.item()
