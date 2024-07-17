@@ -1,3 +1,11 @@
 model.onnx
 .python-version
 __pycache__
+
+
+hedgehog-tokenizer/.xmake/
+hedgehog-tokenizer/build/
+hedgehog-tokenizer/.idea
+hedgehog-tokenizer/linux_x86_64/__pycache__
+# MacOS Cache
+hedgehog-tokenizer/.DS_Store
