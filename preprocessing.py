@@ -28,6 +28,7 @@ FF_DIM = 512
 DROPOUT = 0.5
 N_CHANNELS = 22
 SEQ_LEN = 500
+MAX_EMB_LEN = 1300
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 print("-----------------------------------------------------------------")
@@ -37,12 +38,10 @@ print("-----------------------------------------------------------------")
 
 def weighted_loss(pred, lab):
     loss = 0.
-    all_points = pred.size(0)
-    true_preds = torch.argmax(lab, dim = 1)
+    true_preds = torch.argmax(lab)
     sum = 0.
-    for i in range(all_points):
-        loss += (1-pred[i][true_preds[i]])/gistogram[true_preds[i]]
-        sum += 1/gistogram[true_preds[i]]
+    loss += (1-pred[0][true_preds])/gistogram[true_preds]
+    sum += 1/gistogram[true_preds]
     return loss/sum
     
 
@@ -110,16 +109,14 @@ class Tokenizator():
     def forward(self, data):
         tokens = tokensFrom2DTensor(data, self.dim_count)
         #print(tokens[0].size())
-        out = torch.zeros(1300, self.dim_count*7) #(tokens_count, 7, 15)
+        out = torch.zeros(MAX_EMB_LEN, self.dim_count*7) #(tokens_count, 7, 15)
         tokens_count = len(tokens)
-        if tokens_count <= 1300:
+        if tokens_count <= MAX_EMB_LEN:
             for i in range(0, tokens_count):
                 out[i] = tokens[i]
         else:
-            for i in range(0, 1300):
-                out[i] = tokens[i]
-
-        print(out.size(),' OUT') #torch.Size([1300, 7, 15]) 
+            for i in range(0, MAX_EMB_LEN):
+                out[i] = tokens[i] #torch.Size([1300, 7, 15]) 
         return out
 
 class Transformer(nn.Module):
@@ -131,6 +128,7 @@ class Transformer(nn.Module):
 
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers)
         self.pooling = nn.Linear(self.d_model, tgt_vocab_size)
+        self.pooling_ = nn.Linear(MAX_EMB_LEN * tgt_vocab_size, tgt_vocab_size)
         self.dense = nn.Linear(tgt_vocab_size, tgt_vocab_size)
         self.optimizer = optim.AdamW(self.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9)
         self.softmax = nn.Softmax(dim = 1)
@@ -141,56 +139,39 @@ class Transformer(nn.Module):
         embeddings = self.encoder_embedding.forward(src)     
         enc_output = self.encoder.forward(embeddings).to(device)
         fc_output = self.pooling(enc_output).to(device)
-        dense_output = self.dense(fc_output)
+        emb_reshaped = torch.reshape(fc_output, (1,-1))
+        emb_pooled = self.pooling_(emb_reshaped)
+        dense_output = self.dense(emb_pooled)
         predictions = self.softmax(dense_output).to(device)
-        output = torch.argmax(predictions)
-        return output
+        print(predictions.size())
+        return predictions
 
-    def weightedAccuracy(self, output, labels):
+    def weightedAccuracy(self, output, label):
         correct = 0
-        all_points = output.size(0)
-        pred = torch.argmax(output,dim = 1) #[tensor of indices]
-        true_pred = torch.argmax(labels, dim = 1)
-        sum = 0  #[tensor of indices]
-        for i in range(all_points):
-            if pred[i] == true_pred[i]:
-                correct += 1/gistogram[pred[i]]
-            sum += 1/gistogram[true_pred[i]]    
+        pred = torch.argmax(output)
+        true_pred = torch.argmax(label)
+        sum = 0
+        if pred == true_pred:
+            correct += 1/gistogram[pred]
+        sum += 1/gistogram[true_pred]    
         return correct/sum
 
     def training_step(self, data, lab):
-
-        self.optimizer.zero_grad()
         output = self.forward(data)
-        f_output = output.view(-1, TGT_VOCAB_SIZE)
-        loss = weighted_loss(f_output, lab)
+        loss = weighted_loss(output, lab)
         loss.backward(loss)
         self.optimizer.step()
-        accuracy = self.weightedAccuracy(f_output,lab)
+        self.optimizer.zero_grad()
+        accuracy = self.weightedAccuracy(output,lab)
         return [loss, accuracy]
 
     def valid_step(self,batch):
         data,y,true_pred = batch
         output = self.forward(data)
-        f_output = output.view(-1,TGT_VOCAB_SIZE)
-        loss = weighted_loss(f_output, true_pred)
-        accuracy = self.weightedAccuracy(f_output, true_pred)
+        loss = weighted_loss(output, true_pred)
+        accuracy = self.weightedAccuracy(output, true_pred)
         return [loss, accuracy,embeddings]
 
-
-def labels_to_matrices(labels, tgt_vocab_size, seq_len):
-    local_gistogram = [0,0,0,0,0]
-    class_matrices = torch.zeros(seq_len, tgt_vocab_size-1).to(device)
-    last_class = torch.ones(seq_len, 1).to(device)
-    labels_matrices = torch.cat([class_matrices, last_class],1).to(device)
-    coordinates = list(labels.keys())
-    for i in coordinates:
-        labels_matrices[i][labels[i]-1] = 1.0
-        local_gistogram[labels[i]-1] += 1
-        labels_matrices[i][tgt_vocab_size-1] = 0.0
-    local_gistogram[4] = seq_len - len(coordinates)
-    labels_matrices = labels_matrices.type(torch.FloatTensor).to(device)
-    return [labels_matrices, local_gistogram]
 
 def slice_to_batches(raw_data, batch_size, n_batches, n_chans):
   batch_list = []
@@ -228,9 +209,26 @@ for i in range(len(validating_set)):
     validating_datasets += slice_to_batches(raw_data, SEQ_LEN, n_batches, N_CHANNELS)
     true_preds = torch.from_numpy(mne.events_from_annotations(valid_raw)[0]).to(device)
     pred_dict = {}
-    for l in true_preds:
-        preds_for_one.append(l[2])
+    counter = 0
+    for j in range (n_batches):
+        start = SEQ_LEN * j
+        flag = False
+        label = torch.zeros(5)
+        for id in range (start, start + SEQ_LEN):
+            if (id >= raw_data.size(1)):
+                break
+            if (counter >= true_preds.size(1)):
+                break
+            if (id == true_preds[counter][0]):
+                #label = labels[counter][2]
+                label[true_preds[counter][2] - 1] = 1.0
+                label[4] = 0.
+                counter += 1
 
+        preds_for_one.append(label)
+    for pred in range(true_preds.size(0)):
+        gistogram[true_preds[pred][2]-1] += 1
+    gistogram[4] += (raw_data.size(1)/500 + 1)  - true_preds.size(0)
 labels_for_one = []
 
 for i in range(len(training_set)):
@@ -243,27 +241,21 @@ for i in range(len(training_set)):
     for j in range (n_batches):
         start = SEQ_LEN * j
         flag = False
-        label = torch.tensor(5)
-        label = [0., 0., 0., 0., 1.]
+        label = torch.zeros(5)
         for id in range (start, start + SEQ_LEN):
             if (id >= raw_data.size(1)):
                 break
             if (counter >= labels.size(1)):
                 break
             if (id == labels[counter][0]):
-                #label = labels[counter][2]
                 label[labels[counter][2] - 1] = 1.0
                 label[4] = 0.0
-                #print(id)
-                #print(labels[counter][2])
-                #print(label)
-                #print(counter)
                 counter += 1
 
         labels_for_one.append(label)
-#print(labels_for_one)
-   
-
+    for l in range(labels.size(0)):
+        gistogram[labels[l][2]-1] += 1
+    gistogram[4] += (raw_data.size(1)/500+1) - labels.size(0)
 
 gistogram_tensor = torch.tensor(gistogram).to(device)
 norm_cf = 0.
@@ -286,8 +278,9 @@ best_loss = 9999999999999999.9
 epoch_loss = 0.
 epoch_accuracy = 0.
 model = torch.load("model.onnx")
+batches_pack = []
 for j in range(EPOCHS):
-    running_acc = 0
+    running_acc = 0.
     for i in range(len(training_datasets)):
         transformer.train()
         loss, acc = transformer.training_step(training_datasets[i],labels_for_one[i])
@@ -299,10 +292,10 @@ for j in range(EPOCHS):
             best_loss = loss
             os.remove("model.onnx")
             torch.save(transformer, "model.onnx")
-        if i % 1000 == 999:
-            last_loss = running_loss / 1000 
+        if i % 100 == 0:
+            last_loss = running_loss / 100.
             print("training step")
-            print(f"batch {i+1} mean loss: {last_loss}, mean accuracy: {running_acc/1000}")
+            print(f"batch {i+1} mean loss: {last_loss}, mean accuracy: {running_acc/100.}")
             running_loss = 0
             running_acc = 0
     with open("results.txt", mode = "w") as file:
@@ -310,7 +303,6 @@ for j in range(EPOCHS):
     print(f"Epoch {j} loss {epoch_loss/len(training_datasets)}  accuracy {epoch_accuracy/len(training_datasets)}")
     epoch_accuracy = 0
     epoch_loss = 0
-embeddings = torch.randn(SEQ_LEN,DIM*2)
 valid_loss = 0
 last_loss = 0
 valid_acc = 0
