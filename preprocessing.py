@@ -135,6 +135,8 @@ class Transformer(nn.Module):
         self.mask = torch.triu(torch.ones(N_CHANNELS,self.d_model), diagonal=1)
         self.mask = self.mask.int().float().to(device)
 
+        self.loss = torch.nn.MSELoss()
+
     def forward(self,src):
         embeddings = self.encoder_embedding.forward(src)     
         enc_output = self.encoder.forward(embeddings).to(device)
@@ -143,7 +145,7 @@ class Transformer(nn.Module):
         emb_pooled = self.pooling_(emb_reshaped)
         dense_output = self.dense(emb_pooled)
         predictions = self.softmax(dense_output).to(device)
-        print(predictions.size())
+        #print(predictions.size())
         return predictions
 
     def weightedAccuracy(self, output, label):
@@ -158,19 +160,23 @@ class Transformer(nn.Module):
 
     def training_step(self, data, lab):
         output = self.forward(data)
-        loss = weighted_loss(output, lab)
-        loss.backward(loss)
+        loss_res = self.loss(output, lab)
+        loss_res.backward()
         self.optimizer.step()
         self.optimizer.zero_grad()
-        accuracy = self.weightedAccuracy(output,lab)
-        return [loss, accuracy]
+        is_true = False
+        if torch.argmax(lab) == torch.argmax(output):
+            is_true = True
+        return [loss_res, is_true]
 
     def valid_step(self,batch):
         data,y,true_pred = batch
         output = self.forward(data)
-        loss = weighted_loss(output, true_pred)
-        accuracy = self.weightedAccuracy(output, true_pred)
-        return [loss, accuracy,embeddings]
+        loss_res = self.loss(output, true_pred)
+        is_true = False
+        if torch.argmax(true_pred) == torch.argmax(output):
+            is_true = True
+        return [loss, is_true,embeddings]
 
 
 def slice_to_batches(raw_data, batch_size, n_batches, n_chans):
@@ -213,7 +219,7 @@ for i in range(len(validating_set)):
     for j in range (n_batches):
         start = SEQ_LEN * j
         flag = False
-        label = torch.zeros(5)
+        label = torch.zeros(1, 5)
         for id in range (start, start + SEQ_LEN):
             if (id >= raw_data.size(1)):
                 break
@@ -221,8 +227,8 @@ for i in range(len(validating_set)):
                 break
             if (id == true_preds[counter][0]):
                 #label = labels[counter][2]
-                label[true_preds[counter][2] - 1] = 1.0
-                label[4] = 0.
+                label[0][true_preds[counter][2] - 1] = 1.0
+                label[0][4] = 0.
                 counter += 1
 
         preds_for_one.append(label)
@@ -241,15 +247,15 @@ for i in range(len(training_set)):
     for j in range (n_batches):
         start = SEQ_LEN * j
         flag = False
-        label = torch.zeros(5)
+        label = torch.zeros(1, 5)
         for id in range (start, start + SEQ_LEN):
             if (id >= raw_data.size(1)):
                 break
             if (counter >= labels.size(1)):
                 break
             if (id == labels[counter][0]):
-                label[labels[counter][2] - 1] = 1.0
-                label[4] = 0.0
+                label[0][labels[counter][2] - 1] = 1.0
+                label[0][4] = 0.0
                 counter += 1
 
         labels_for_one.append(label)
@@ -281,6 +287,7 @@ model = torch.load("model.onnx")
 batches_pack = []
 for j in range(EPOCHS):
     running_acc = 0.
+    running_loss = 0.
     for i in range(len(training_datasets)):
         transformer.train()
         loss, acc = transformer.training_step(training_datasets[i],labels_for_one[i])
@@ -292,10 +299,10 @@ for j in range(EPOCHS):
             best_loss = loss
             os.remove("model.onnx")
             torch.save(transformer, "model.onnx")
-        if i % 100 == 0:
-            last_loss = running_loss / 100.
+        if i % 200 == 0:
+            last_loss = running_loss / 200.
             print("training step")
-            print(f"batch {i+1} mean loss: {last_loss}, mean accuracy: {running_acc/100.}")
+            print(f"batch {i+1} mean loss: {last_loss}, mean accuracy: {running_acc/200.}")
             running_loss = 0
             running_acc = 0
     with open("results.txt", mode = "w") as file:
