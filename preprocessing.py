@@ -180,14 +180,13 @@ class Transformer(nn.Module):
             is_true = 1.
         return [loss_res, is_true, output]
 
-    def valid_step(self,batch):
-        data,y,true_pred = batch
+    def valid_step(self, data, lab):
         output = self.forward(data)
-        loss_res = self.loss(output, true_pred.to(device))
+        loss_res = self.loss(output, lab.to(device))
         is_true = 0.
-        if torch.argmax(true_pred) == torch.argmax(output):
+        if torch.argmax(lab) == torch.argmax(output):
             is_true = 1.
-        return [loss, is_true,embeddings]
+        return [loss, is_true, output]
 
 
 def slice_to_batches(raw_data, batch_size, n_batches, n_chans):
@@ -273,6 +272,33 @@ for i in range(len(training_set)):
         labels_for_one.append(label)
         gistogram[torch.argmax(label[0])] += 1.
 
+valid_labels = []
+
+for i in range(len(validating_set)):
+    train_raw = validating_set[i].raw
+    raw_data = torch.from_numpy(train_raw.get_data()).to(device)
+    n_batches = raw_data.size(1)//SEQ_LEN
+    training_datasets += slice_to_batches(raw_data, SEQ_LEN, n_batches, N_CHANNELS)
+    labels = torch.from_numpy(mne.events_from_annotations(train_raw)[0]).to(device)
+    counter = 0
+    for j in range (n_batches):
+        start = SEQ_LEN * j
+        flag = False
+        label = torch.zeros(1, 5)
+        label[0][4] = 1.
+        for id in range (start, start + SEQ_LEN):
+            if (id >= raw_data.size(1)):
+                break
+            if (counter >= labels.size(1)):
+                break
+            if (id == labels[counter][0]):
+                label[0][labels[counter][2] - 1] = 1.0
+                label[0][4] = 0.0
+                counter += 1
+
+        valid_labels.append(label)
+        gistogram[torch.argmax(label[0])] += 1.
+
 full_count = torch.dot(gistogram, torch.ones(5))
 weights = torch.zeros(5)
 for i in range(0, 5):
@@ -302,9 +328,6 @@ for j in range(EPOCHS):
     running_loss = 0.
     non_zero_count = 0.
     non_zero_correct = 0.
-    transformer.scheduler.step() # обновление lr
-    current_lr = transformer.scheduler.get_last_lr()[0] # выводим значение ->
-    print(f"Epoch {j}: Learning Rate {current_lr}") # -> lr на данной эпохе
 
     for i in range(len(training_datasets)):
         transformer.train()
@@ -326,10 +349,12 @@ for j in range(EPOCHS):
             print("training step")
             print(f"batch {i+1} mean loss: {last_loss}, mean accuracy: {running_acc/200.}")
             print(f"non-zero count: {non_zero_count}, non-zero correct {non_zero_correct}")
-            if non_zero_correct != 0:
+            if non_zero_count != 0:
                 print(f"non-zero accuracy {non_zero_correct/non_zero_count}")
-            running_loss = 0
-            running_acc = 0
+            running_loss = 0.
+            running_acc = 0.
+            non_zero_count = 0.
+            non_zero_correct = 0.
 
     transformer.scheduler.step() # обновление lr
     current_lr = transformer.scheduler.get_last_lr()[0] # выводим значение ->
@@ -343,14 +368,25 @@ for j in range(EPOCHS):
 valid_loss = 0
 last_loss = 0
 valid_acc = 0
+non_zero_count = 0.
+non_zero_correct = 0.
 
 for i in range(len(validating_datasets)):
-    loss,acc,embeddings = transformer.valid_step([validating_datasets[i],embeddings, pred_batches[i]])
+    loss,acc, out = transformer.valid_step([validating_datasets[i], valid_labels[i]])
     valid_loss += loss.item()
     valid_acc += acc
-    if i % 10 == 9:
-        last_loss = valid_loss / 10 
+    if torch.argmax(valid_labels[i][0]) != 4:
+            non_zero_count += 1.
+            if torch.argmax(valid_labels[i][0]) == torch.argmax(out[0]):
+                non_zero_correct += 1.
+    if i % 200 == 0:
+        last_loss = valid_loss / 200 
         print("validating step")
         print(f"batch {i+1} mean loss: {last_loss}, mean accuracy: {valid_acc/10}")
+        print(f"non-zero count: {non_zero_count}, non-zero correct {non_zero_correct}")
+        if non_zero_count != 0:
+            print(f"non-zero accuracy {non_zero_correct/non_zero_count}")
         valid_loss = 0
         valid_acc = 0
+        non_zero_count = 0.
+        non_zero_correct = 0.
