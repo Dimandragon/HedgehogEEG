@@ -38,7 +38,7 @@ print(device)
 print("-----------------------------------------------------------------")
 
 def lr_change(epoch):
-    warmup_steps = 3 #количество эпох, после которого lr начнет снижаться
+    warmup_steps = 10 #количество эпох, после которого lr начнет снижаться
     if epoch < warmup_steps:
         return epoch / warmup_steps
     else:
@@ -147,13 +147,13 @@ class Transformer(nn.Module):
         self.loss = torch.nn.MSELoss()
 
     def forward(self,src):
-        embeddings = self.encoder_embedding.forward(src)     
+        embeddings = self.encoder_embedding.forward(src).to(device) 
         enc_output = self.encoder.forward(embeddings).to(device)
         fc_output = self.pooling(enc_output).to(device)
-        emb_reshaped = torch.reshape(fc_output, (1,-1))
-        emb_pooled = self.pooling_(emb_reshaped)
-        dense_output = self.dense(emb_pooled)
-        predictions = self.softmax(dense_output).to(device)
+        emb_reshaped = torch.reshape(fc_output, (1,-1)).to(device)
+        emb_pooled = self.pooling_(emb_reshaped).to(device)
+        dense_output = self.dense(emb_pooled).to(device)
+        predictions = self.softmax(dense_output).to("cpu")
         #print(predictions.size())
         return predictions
 
@@ -286,7 +286,7 @@ torch.save(transformer, "model.onnx")
 running_loss = 0
 last_loss = 0
 running_acc = 0
-EPOCHS = 1
+EPOCHS = 100
 output = 0
 start_time = time.time()
 best_loss = 9999999999999999.9
