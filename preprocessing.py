@@ -17,6 +17,8 @@ import braindecode
 from braindecode.datasets import MOABBDataset, BaseConcatDataset
 from numpy import multiply
 
+from torch.optim.lr_scheduler import LambdaLR
+
 sys.path.append("hedgehog-tokenizer/out/")
 import extractor
 import encoding
@@ -35,7 +37,13 @@ print("-----------------------------------------------------------------")
 print(device)
 print("-----------------------------------------------------------------")
 
-
+def lr_change(epoch):
+    warmup_steps = 3 #количество эпох, после которого lr начнет снижаться
+    if epoch < warmup_steps:
+        return epoch / warmup_steps
+    else:
+        return (warmup_steps / epoch) ** 0.5 # формула, уменьшающая lr
+    
 def weighted_loss(pred, lab):
     loss = 0.
     true_preds = torch.argmax(lab)
@@ -131,6 +139,7 @@ class Transformer(nn.Module):
         self.pooling_ = nn.Linear(MAX_EMB_LEN * tgt_vocab_size, tgt_vocab_size)
         self.dense = nn.Linear(tgt_vocab_size, tgt_vocab_size)
         self.optimizer = optim.AdamW(self.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9)
+        self.scheduler = LambdaLR(self.optimizer, lr_change) # завернули AdamW в функцию, изменяющую lr
         self.softmax = nn.Softmax(dim = 1)
         self.mask = torch.triu(torch.ones(N_CHANNELS,self.d_model), diagonal=1)
         self.mask = self.mask.int().float().to(device)
@@ -288,6 +297,10 @@ batches_pack = []
 for j in range(EPOCHS):
     running_acc = 0.
     running_loss = 0.
+    transformer.scheduler.step() # обновление lr
+    current_lr = transformer.scheduler.get_last_lr()[0] # выводим значение ->
+    print(f"Epoch {EPOCHS}: Learning Rate {current_lr}") # -> lr на данной эпохе
+
     for i in range(len(training_datasets)):
         transformer.train()
         loss, acc = transformer.training_step(training_datasets[i],labels_for_one[i])
