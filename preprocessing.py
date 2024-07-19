@@ -38,7 +38,7 @@ print(device)
 print("-----------------------------------------------------------------")
 
 def lr_change(epoch):
-    warmup_steps = 10 #количество эпох, после которого lr начнет снижаться
+    warmup_steps = 2 #количество эпох, после которого lr начнет снижаться
     if epoch < warmup_steps:
         return epoch / warmup_steps
     else:
@@ -128,7 +128,7 @@ class Tokenizator():
         return out
 
 class Transformer(nn.Module):
-    def __init__(self, num_heads, num_layers, d_ff, tgt_vocab_size,dim_count):
+    def __init__(self, num_heads, num_layers, d_ff, tgt_vocab_size,dim_count, classes_weights):
         super(Transformer, self).__init__()
         self.d_model = 7*dim_count
         self.encoder_embedding = Tokenizator(dim_count)
@@ -144,7 +144,7 @@ class Transformer(nn.Module):
         self.mask = torch.triu(torch.ones(N_CHANNELS,self.d_model), diagonal=1)
         self.mask = self.mask.int().float().to(device)
 
-        self.loss = torch.nn.MSELoss()
+        self.loss = torch.nn.CrossEntropyLoss(weight = classes_weights)
 
     def forward(self,src):
         embeddings = self.encoder_embedding.forward(src).to(device) 
@@ -153,7 +153,7 @@ class Transformer(nn.Module):
         emb_reshaped = torch.reshape(fc_output, (1,-1)).to(device)
         emb_pooled = self.pooling_(emb_reshaped).to(device)
         dense_output = self.dense(emb_pooled).to(device)
-        predictions = self.softmax(dense_output).to("cpu")
+        predictions = self.softmax(dense_output).to(device)
         #print(predictions.size())
         return predictions
 
@@ -169,22 +169,24 @@ class Transformer(nn.Module):
 
     def training_step(self, data, lab):
         output = self.forward(data)
-        loss_res = self.loss(output, lab)
+        loss_res = self.loss(output, lab.to(device))
+        #print(output, lab, loss_res)
+        #print("          ")
         loss_res.backward()
         self.optimizer.step()
         self.optimizer.zero_grad()
-        is_true = False
+        is_true = 0.
         if torch.argmax(lab) == torch.argmax(output):
-            is_true = True
-        return [loss_res, is_true]
+            is_true = 1.
+        return [loss_res, is_true, output]
 
     def valid_step(self,batch):
         data,y,true_pred = batch
         output = self.forward(data)
-        loss_res = self.loss(output, true_pred)
-        is_true = False
+        loss_res = self.loss(output, true_pred.to(device))
+        is_true = 0.
         if torch.argmax(true_pred) == torch.argmax(output):
-            is_true = True
+            is_true = 1.
         return [loss, is_true,embeddings]
 
 
@@ -213,7 +215,7 @@ training_datasets = []
 labels_batches = []
 validating_datasets = []
 pred_batches = []
-gistogram = [0,0,0,0,0]
+gistogram = torch.zeros(5)
 
 preds_for_one = []
 
@@ -229,6 +231,7 @@ for i in range(len(validating_set)):
         start = SEQ_LEN * j
         flag = False
         label = torch.zeros(1, 5)
+        label[0][4] = 1.
         for id in range (start, start + SEQ_LEN):
             if (id >= raw_data.size(1)):
                 break
@@ -239,11 +242,10 @@ for i in range(len(validating_set)):
                 label[0][true_preds[counter][2] - 1] = 1.0
                 label[0][4] = 0.
                 counter += 1
-
+        
+        gistogram[torch.argmax(label[0])] += 1.
         preds_for_one.append(label)
-    for pred in range(true_preds.size(0)):
-        gistogram[true_preds[pred][2]-1] += 1
-    gistogram[4] += (raw_data.size(1)/500 + 1)  - true_preds.size(0)
+
 labels_for_one = []
 
 for i in range(len(training_set)):
@@ -257,6 +259,7 @@ for i in range(len(training_set)):
         start = SEQ_LEN * j
         flag = False
         label = torch.zeros(1, 5)
+        label[0][4] = 1.
         for id in range (start, start + SEQ_LEN):
             if (id >= raw_data.size(1)):
                 break
@@ -268,25 +271,25 @@ for i in range(len(training_set)):
                 counter += 1
 
         labels_for_one.append(label)
-    for l in range(labels.size(0)):
-        gistogram[labels[l][2]-1] += 1
-    gistogram[4] += (raw_data.size(1)/500+1) - labels.size(0)
+        gistogram[torch.argmax(label[0])] += 1.
 
-gistogram_tensor = torch.tensor(gistogram).to(device)
-norm_cf = 0.
-normalized_list = []
-for i in gistogram:
-    norm_cf += 1/i
-for i in gistogram:
-    normalized_list.append((1/i)/norm_cf)
-print(gistogram)
-transformer = Transformer(NUM_HEADS,NUM_LAYERS,FF_DIM,TGT_VOCAB_SIZE,DIM_COUNT)#d_model, num_heads, num_layers, d_ff, seq_lenght, dropout,in_d,tgt_vocab_size
+full_count = torch.dot(gistogram, torch.ones(5))
+weights = torch.zeros(5)
+for i in range(0, 5):
+    weights[i] = 1 - gistogram[i]/full_count
+
+
+print("---------------------------------------------------")
+print(gistogram, weights)
+print("---------------------------------------------------")
+
+transformer = Transformer(NUM_HEADS,NUM_LAYERS,FF_DIM,TGT_VOCAB_SIZE,DIM_COUNT, weights)#d_model, num_heads, num_layers, d_ff, seq_lenght, dropout,in_d,tgt_vocab_size
 transformer = transformer.to(device)
 torch.save(transformer, "model.onnx")
 running_loss = 0
 last_loss = 0
 running_acc = 0
-EPOCHS = 100
+EPOCHS = 10
 output = 0
 start_time = time.time()
 best_loss = 9999999999999999.9
@@ -297,17 +300,23 @@ batches_pack = []
 for j in range(EPOCHS):
     running_acc = 0.
     running_loss = 0.
+    non_zero_count = 0.
+    non_zero_correct = 0.
     transformer.scheduler.step() # обновление lr
     current_lr = transformer.scheduler.get_last_lr()[0] # выводим значение ->
-    print(f"Epoch {EPOCHS}: Learning Rate {current_lr}") # -> lr на данной эпохе
+    print(f"Epoch {j}: Learning Rate {current_lr}") # -> lr на данной эпохе
 
     for i in range(len(training_datasets)):
         transformer.train()
-        loss, acc = transformer.training_step(training_datasets[i],labels_for_one[i])
+        loss, acc, out = transformer.training_step(training_datasets[i],labels_for_one[i])
         running_loss += loss.item()
         running_acc += acc
+        if torch.argmax(labels_for_one[i][0]) != 4:
+            non_zero_count += 1.
+            if torch.argmax(labels_for_one[i][0]) == torch.argmax(out[0]):
+                non_zero_correct += 1.
         epoch_loss += loss.item()
-        epoch_accuracy += acc
+        epoch_accuracy += float(acc)
         if loss < best_loss:
             best_loss = loss
             os.remove("model.onnx")
@@ -316,8 +325,16 @@ for j in range(EPOCHS):
             last_loss = running_loss / 200.
             print("training step")
             print(f"batch {i+1} mean loss: {last_loss}, mean accuracy: {running_acc/200.}")
+            print(f"non-zero count: {non_zero_count}, non-zero correct {non_zero_correct}")
+            if non_zero_correct != 0:
+                print(f"non-zero accuracy {non_zero_correct/non_zero_count}")
             running_loss = 0
             running_acc = 0
+
+    transformer.scheduler.step() # обновление lr
+    current_lr = transformer.scheduler.get_last_lr()[0] # выводим значение ->
+    print(f"Epoch {j}: Learning Rate {current_lr}") # -> lr на данной эпохе
+
     with open("results.txt", mode = "w") as file:
         file.write(f"{epoch_loss/len(training_datasets)} {epoch_accuracy/len(training_datasets)} {best_loss}")
     print(f"Epoch {j} loss {epoch_loss/len(training_datasets)}  accuracy {epoch_accuracy/len(training_datasets)}")
