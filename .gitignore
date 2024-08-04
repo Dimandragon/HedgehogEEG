@@ -9,3 +9,4 @@ hedgehog-tokenizer/.idea
 hedgehog-tokenizer/linux_x86_64/__pycache__
 # MacOS Cache
 hedgehog-tokenizer/.DS_Store
+results.txt
