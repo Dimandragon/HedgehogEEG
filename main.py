@@ -349,9 +349,9 @@ for i in range(len(validating_datasets)):
     valid_loss += loss.item()
     valid_acc += acc
     if torch.argmax(preds_for_one[i][0]) != 4:
-            non_zero_count += 1.
-            if torch.argmax(preds_for_one[i][0]) == torch.argmax(out[0]):
-                non_zero_correct += 1.
+        non_zero_count += 1.
+        if torch.argmax(preds_for_one[i][0]) == torch.argmax(out[0]):
+            non_zero_correct += 1.
     if i % 200 == 0:
         last_loss = valid_loss / 200 
         print("validating step")
