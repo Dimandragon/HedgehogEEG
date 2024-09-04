@@ -1,20 +1,13 @@
 import sys
 import torch
 from torch import nn
-import math
 import mne
 import os
-from mne.datasets import eegbci
-from mne import channels
-import numpy as np
-import torch.utils.data as data
-import torch.nn.functional as F
 from torch import optim
 import time
 import random
-import braindecode
 
-from braindecode.datasets import MOABBDataset, BaseConcatDataset
+from braindecode.datasets import MOABBDataset
 from numpy import multiply
 
 from torch.optim.lr_scheduler import LambdaLR
@@ -22,6 +15,10 @@ from torch.optim.lr_scheduler import LambdaLR
 sys.path.append("hedgehog-tokenizer/out/")
 import extractor
 import encoding
+''''''
+batches = 0
+labels_counting = [0,0,0,0,0]
+''''''
 DIM_COUNT = 15
 TGT_VOCAB_SIZE = 5
 NUM_HEADS=5
@@ -43,15 +40,36 @@ def lr_change(epoch):
         return epoch / warmup_steps
     else:
         return (warmup_steps / epoch) ** 0.5 # формула, уменьшающая lr
-    
-def weighted_loss(pred, lab):
+
+"""def weighted_loss(pred, lab):
     loss = 0.
     true_preds = torch.argmax(lab)
     sum = 0.
     loss += (1-pred[0][true_preds])/gistogram[true_preds]
     sum += 1/gistogram[true_preds]
-    return loss/sum
+    return loss/sum"""
     
+class Dataloader():
+    def __init__(self, histogram):
+        self.histogram = histogram
+        self.norm_coff_list = [min(self.histogram)/(self.histogram[0]), 
+             min(self.histogram)/(self.histogram[1]), 
+             min(self.histogram)/(self.histogram[2]), 
+             min(self.histogram)/(self.histogram[3]), 
+             min(self.histogram)/(self.histogram[4])]
+        
+        print("---------------------------------------------------")
+        print("norm_coff_list")
+        print(self.norm_coff_list)
+        print("---------------------------------------------------")
+
+    def calculate_probability(self, label):
+        prob = random.random()
+        #print(prob, self.norm_coff_list[label])
+        if self.norm_coff_list[label] > prob:
+            return True
+        else:
+            return False
 
 def tokensFrom2DTensor(data, dim_count):
     tokenizer = extractor.InstFreqNormSincTokenizer()
@@ -190,16 +208,16 @@ class Transformer(nn.Module):
 
 
 def slice_to_batches(raw_data, batch_size, n_batches, n_chans):
-  batch_list = []
-  for b in range(n_batches):
-    single_batch = []
-    for i in range(n_chans):
-      element = raw_data[i][(b*batch_size):((b+1)*batch_size)]
-      element = element.unsqueeze(0).to(device)
-      single_batch.append(element)
-    tensored = torch.cat(single_batch,0).type(torch.FloatTensor).to(device)
-    batch_list.append(tensored)
-  return batch_list
+    batch_list = []
+    for b in range(n_batches):
+        single_batch = []
+        for i in range(n_chans):
+            element = raw_data[i][(b*batch_size):((b+1)*batch_size)]
+            element = element.unsqueeze(0).to(device)
+            single_batch.append(element)
+        tensored = torch.cat(single_batch,0).type(torch.FloatTensor).to(device)
+        batch_list.append(tensored)
+    return batch_list
 
 
 
@@ -247,6 +265,7 @@ for i in range(len(validating_set)):
 
 labels_for_one = []
 
+
 for i in range(len(training_set)):
     train_raw = training_set[i].raw
     raw_data = torch.from_numpy(train_raw.get_data()).to(device)
@@ -272,6 +291,8 @@ for i in range(len(training_set)):
         labels_for_one.append(label)
         gistogram[torch.argmax(label[0])] += 1.
 
+valid_labels = []
+
 full_count = torch.dot(gistogram, torch.ones(5))
 weights = torch.zeros(5)
 for i in range(0, 5):
@@ -282,13 +303,15 @@ print("---------------------------------------------------")
 print(gistogram, weights)
 print("---------------------------------------------------")
 
+
 transformer = Transformer(NUM_HEADS,NUM_LAYERS,FF_DIM,TGT_VOCAB_SIZE,DIM_COUNT, weights)#d_model, num_heads, num_layers, d_ff, seq_lenght, dropout,in_d,tgt_vocab_size
 transformer = transformer.to(device)
+dataloader = Dataloader(gistogram)
 torch.save(transformer, "model.onnx")
 running_loss = 0
 last_loss = 0
 running_acc = 0
-EPOCHS = 10
+EPOCHS = 2850
 output = 0
 start_time = time.time()
 best_loss = 9999999999999999.9
@@ -304,6 +327,10 @@ for j in range(EPOCHS):
 
     for i in range(len(training_datasets)):
         transformer.train()
+        if dataloader.calculate_probability(torch.argmax(labels_for_one[i])) == False:
+            continue
+        batches += 1
+        labels_counting[torch.argmax(labels_for_one[i])] += 1
         loss, acc, out = transformer.training_step(training_datasets[i],labels_for_one[i])
         running_loss += loss.item()
         running_acc += acc
@@ -329,6 +356,7 @@ for j in range(EPOCHS):
             non_zero_count = 0.
             non_zero_correct = 0.
 
+
     transformer.scheduler.step() # обновление lr
     current_lr = transformer.scheduler.get_last_lr()[0] # выводим значение ->
     print(f"Epoch {j}: Learning Rate {current_lr}") # -> lr на данной эпохе
@@ -343,9 +371,9 @@ last_loss = 0
 valid_acc = 0
 non_zero_count = 0.
 non_zero_correct = 0.
-
+print(f"BATCHES IN ONE EPOCH: {batches}, LABELS STATS: {labels_counting}")
 for i in range(len(validating_datasets)):
-    loss,acc, out = transformer.valid_step([validating_datasets[i], preds_for_one[i]])
+    loss,acc, out = transformer.valid_step(validating_datasets[i], preds_for_one[i])
     valid_loss += loss.item()
     valid_acc += acc
     if torch.argmax(preds_for_one[i][0]) != 4:
