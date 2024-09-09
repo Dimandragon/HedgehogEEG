@@ -12,8 +12,7 @@ from numpy import multiply
 
 from torch.optim.lr_scheduler import LambdaLR
 
-sys.path.append("hedgehog-tokenizer/out/")
-import extractor
+import hedgehog-tokenizer/out/extractor
 import encoding
 ''''''
 batches = 0
@@ -72,9 +71,10 @@ class Dataloader():
             return False
 
 def tokensFrom2DTensor(data, dim_count):
-    tokenizer = extractor.InstFreqNormSincTokenizer()
-    tokenizer.locality_coeff = 2
-    tokenizer.period_muller = 1.1
+    tokenizer = extractor.InstFreqNormSincReqTokenizer()
+    tokenizer.locality_coeff = 5
+    tokenizer.period_muller = 1.15
+    tokenizer.max_iter_number_for_filter = 3
     raw_tokens = [] # list of lists
 
     for channel in data:
@@ -86,7 +86,7 @@ def tokensFrom2DTensor(data, dim_count):
         temp_raw_tokens = tokenizer.getTokens()
         raw_tokens.append(temp_raw_tokens)
     
-    max_t = 0.0
+    max_t = 0.0w
     max_val = 0.0
     max_inst_freq = 0.0
     max_inst_ampl = 0.0
@@ -361,9 +361,9 @@ for j in range(EPOCHS):
     current_lr = transformer.scheduler.get_last_lr()[0] # выводим значение ->
     print(f"Epoch {j}: Learning Rate {current_lr}") # -> lr на данной эпохе
 
-    with open("results.txt", mode = "w") as file:
+    '''with open("results.txt", mode = "w") as file:
         file.write(f"{epoch_loss/len(training_datasets)} {epoch_accuracy/len(training_datasets)} {best_loss}")
-    print(f"Epoch {j} loss {epoch_loss/len(training_datasets)}  accuracy {epoch_accuracy/len(training_datasets)}")
+    print(f"Epoch {j} loss {epoch_loss/len(training_datasets)}  accuracy {epoch_accuracy/len(training_datasets)}")'''
     epoch_accuracy = 0
     epoch_loss = 0
 valid_loss = 0
