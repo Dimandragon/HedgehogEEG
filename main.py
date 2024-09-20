@@ -86,7 +86,7 @@ def tokensFrom2DTensor(data, dim_count):
         temp_raw_tokens = tokenizer.getTokens()
         raw_tokens.append(temp_raw_tokens)
     
-    max_t = 0.0w
+    max_t = 0.0
     max_val = 0.0
     max_inst_freq = 0.0
     max_inst_ampl = 0.0
