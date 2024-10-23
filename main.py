@@ -6,13 +6,15 @@ import os
 from torch import optim
 import time
 import random
+import math
 
 from braindecode.datasets import MOABBDataset
 from numpy import multiply
 
 from torch.optim.lr_scheduler import LambdaLR
 
-import hedgehog-tokenizer/out/extractor
+sys.path.append("hedgehog-tokenizer/out/")
+import extractor
 import encoding
 ''''''
 batches = 0
@@ -28,6 +30,9 @@ N_CHANNELS = 22
 SEQ_LEN = 500
 MAX_EMB_LEN = 1300
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+TOKENIZER_FILTERING_ITERS = 5
+TOKENIZER_PHASE_SHIFTS_COUNT = 20
 
 print("-----------------------------------------------------------------")
 print(device)
@@ -71,10 +76,12 @@ class Dataloader():
             return False
 
 def tokensFrom2DTensor(data, dim_count):
-    tokenizer = extractor.InstFreqNormSincReqTokenizer()
-    tokenizer.locality_coeff = 5
-    tokenizer.period_muller = 1.15
-    tokenizer.max_iter_number_for_filter = 3
+    phase_shifts = extractor.DoubleVector()
+    for i in range (0, TOKENIZER_PHASE_SHIFTS_COUNT):
+        phase_shifts.append(i * (1.0 / TOKENIZER_PHASE_SHIFTS_COUNT) * math.pi)
+    tokenizer = extractor.MakimaModeDecompositionBasedTokenizer()
+    tokenizer.max_iter_number_for_filter = TOKENIZER_FILTERING_ITERS
+    tokenizer.phase_shifts = phase_shifts
     raw_tokens = [] # list of lists
 
     for channel in data:
@@ -86,7 +93,7 @@ def tokensFrom2DTensor(data, dim_count):
         temp_raw_tokens = tokenizer.getTokens()
         raw_tokens.append(temp_raw_tokens)
     
-    max_t = 0.0w
+    max_t = 0.0
     max_val = 0.0
     max_inst_freq = 0.0
     max_inst_ampl = 0.0
@@ -361,9 +368,9 @@ for j in range(EPOCHS):
     current_lr = transformer.scheduler.get_last_lr()[0] # выводим значение ->
     print(f"Epoch {j}: Learning Rate {current_lr}") # -> lr на данной эпохе
 
-    '''with open("results.txt", mode = "w") as file:
+    with open("results.txt", mode = "w") as file:
         file.write(f"{epoch_loss/len(training_datasets)} {epoch_accuracy/len(training_datasets)} {best_loss}")
-    print(f"Epoch {j} loss {epoch_loss/len(training_datasets)}  accuracy {epoch_accuracy/len(training_datasets)}")'''
+    print(f"Epoch {j} loss {epoch_loss/len(training_datasets)}  accuracy {epoch_accuracy/len(training_datasets)}")
     epoch_accuracy = 0
     epoch_loss = 0
 valid_loss = 0
